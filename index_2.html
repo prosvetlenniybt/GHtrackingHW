@@ -83,6 +83,12 @@ function makeProject(p) {
   return { ...p, stages: {}, notes: '' };
 }
 
+// Firebase Realtime Database не хранит пустые объекты ({}) — при записи
+// stages: {} это поле пропадает. Восстанавливаем дефолты при чтении.
+function normalizeProjects(arr) {
+  return arr.map(p => ({ ...p, stages: p.stages || {}, notes: p.notes || '' }));
+}
+
 // --- иконки (инлайн SVG, без внешних пакетов) ---
 const IconChevronDown = (p) => (
   <svg className={p.className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
@@ -118,8 +124,9 @@ function ProjectTracker() {
         const data = snapshot.val();
         setConnStatus('ok');
         if (data && Array.isArray(data) && data.length > 0) {
-          setProjects(data);
-          setExpanded(prev => Object.keys(prev).length ? prev : { [data[0].id]: true });
+          const normalized = normalizeProjects(data);
+          setProjects(normalized);
+          setExpanded(prev => Object.keys(prev).length ? prev : { [normalized[0].id]: true });
         } else if (data === null) {
           const initial = DEFAULT_PROJECTS.map(makeProject);
           dbRef.set(initial);
