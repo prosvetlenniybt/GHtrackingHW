@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Трекер экспериментов</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+  body { font-family: 'Nunito', system-ui, sans-serif; }
+  .duo-cta { transition: transform .08s ease; box-shadow: 0 4px 0 #B00015; }
+  .duo-cta:active { transform: translateY(4px); box-shadow: 0 0 0; }
+  @keyframes pop { 0%{transform:scale(.6);opacity:0;} 60%{transform:scale(1.08);} 100%{transform:scale(1);opacity:1;} }
+  .duo-pop { animation: pop .35s ease-out; }
+  @keyframes confetti-fall { 0%{transform:translateY(-20px) rotate(0);opacity:1;} 100%{transform:translateY(440px) rotate(560deg);opacity:0;} }
+  .confetti-piece { position:absolute; width:10px; height:14px; top:0; animation: confetti-fall 1.6s ease-in forwards; }
+  @keyframes pulse-soft { 0%,100%{opacity:1;} 50%{opacity:.45;} }
+  .pulse-soft { animation: pulse-soft 1.6s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce){ .confetti-piece,.pulse-soft{animation:none!important;} }
+</style>
+</head>
+<body class="bg-[#F7F7F7] min-h-screen">
+<div id="root"></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel">
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAoQsUVOd59rbQ8bJJ2pMklpZqiNTyS1cY",
+  authDomain: "gh-project-tracker.firebaseapp.com",
+  databaseURL: "https://gh-project-tracker-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "gh-project-tracker",
+  storageBucket: "gh-project-tracker.firebasestorage.app",
+  messagingSenderId: "786916155688",
+  appId: "1:786916155688:web:017fab174a0e7b3ace701d",
+  measurementId: "G-7BS7RXXBB1"
+};
+
+const DB_PATH = "projectTracker";
+const XP_PER_WEIGHT = 10;
+const STALE_DAYS = 7;            // порог застоя активного этапа
+const DEFAULT_WINDOW = 14;       // плановое окно прогона, дней
+const isConfigured = firebaseConfig.apiKey !== "YOUR_API_KEY";
+
+let db = null;
+if (isConfigured) { firebase.initializeApp(firebaseConfig); db = firebase.database(); }
+
+// phase: 0 Подготовка, 1 Запуск, 2 Прогон (без этапов — таймер), 3 Анализ, 4 Завершение
+const STAGES = [
+  { id: 'mockups',     label: 'Макеты',          role: 'я',              phase: 0, weight: 3 },
+  { id: 'landings',    label: 'Лендинги',        role: 'я / разработчик',phase: 0, weight: 2 },
+  { id: 'bzrb',        label: 'БЗРБ',            role: 'я',              phase: 0, weight: 2 },
+  { id: 'applications',label: 'Заявки',          role: 'я',              phase: 0, weight: 1 },
+  { id: 'kusy',        label: 'Кусы',            role: 'аналитик',       phase: 0, weight: 1 },
+  { id: 'test_rollout',label: 'Выкат тестовый',  role: 'саппорт',        phase: 1, weight: 1, optional: true, note: 'нужны доп. заявки' },
+  { id: 'rollout',     label: 'Выкат',          role: 'саппорт',        phase: 1, weight: 1 },
+  { id: 'calculate',   label: 'Посчитать',       role: 'аналитик',       phase: 3, weight: 2 },
+  { id: 'presentation',label: 'Презентация',     role: 'я',              phase: 3, weight: 3 },
+  { id: 'remove',      label: 'Удалить',         role: 'саппорт',        phase: 4, weight: 1 },
+];
+
+const PHASES = [
+  { id: 0, name: 'Подготовка' },
+  { id: 1, name: 'Запуск' },
+  { id: 2, name: 'Прогон', isRun: true },
+  { id: 3, name: 'Анализ' },
+  { id: 4, name: 'Завершение' },
+];
+
+const STATUS = {
+  not_started: { label: 'Не начато', cls: 'bg-slate-100 text-slate-400',  dot: 'bg-slate-300' },
+  in_progress: { label: 'В работе',  cls: 'bg-blue-50 text-[#1899D6]',    dot: 'bg-[#1CB0F6]' },
+  waiting:     { label: 'Ждёт',      cls: 'bg-amber-50 text-amber-600',   dot: 'bg-[#FF9600]' },
+  done:        { label: 'Готово',    cls: 'bg-red-50 text-[#B00015]',   dot: 'bg-[#E0001A]' },
+  skipped:     { label: 'Пропущено', cls: 'bg-slate-50 text-slate-400',   dot: 'bg-slate-200' },
+};
+
+const ROLE_STYLES = {
+  'я': 'bg-indigo-50 text-indigo-600',
+  'я / разработчик': 'bg-violet-50 text-violet-600',
+  'аналитик': 'bg-teal-50 text-teal-600',
+  'саппорт': 'bg-amber-50 text-amber-600',
+};
+
+const DEFAULT_PROJECTS = [
+  { id: 'p1', number: '1', name: 'Умная камера. Профайлер', category: null },
+  { id: 'p2', number: '2', name: 'ИИ-рекрутер', category: null },
+  { id: 'p3', number: '3', name: 'ИИ-сервисы', category: null },
+  { id: 'p4_0', number: '4.0', name: 'Страховка. Формулировка', category: 'Макеты дизайн-экспа' },
+  { id: 'p4_1', number: '4.1', name: 'Эластичность спроса', category: 'Макеты дизайн-экспа' },
+  { id: 'p4_2', number: '4.2', name: 'Страховка. Лендинг', category: 'Макеты дизайн-экспа' },
+  { id: 'p4_3', number: '4.3', name: 'Страховка. Тарифы', category: 'Макеты дизайн-экспа' },
+  { id: 'p5', number: '5', name: 'Двойное прикладывание комбо-счёта', category: null },
+];
+
+function localDate(d = new Date()) {
+  const t = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+  return t.toISOString().slice(0, 10);
+}
+function daysBetween(a, b) {
+  if (!a || !b) return null;
+  return Math.round((new Date(b) - new Date(a)) / 86400000);
+}
+function daysSince(dateStr) { return dateStr ? daysBetween(dateStr, localDate()) : null; }
+
+// миграция: старый формат stages={id:true} или {} -> новый объектный
+function normStage(v) {
+  if (v === true) return { status: 'done', doneAt: null };
+  if (v && typeof v === 'object' && v.status) return { status: v.status, since: v.since || null, doneAt: v.doneAt || null };
+  return { status: 'not_started' };
+}
+function normalizeProjects(arr) {
+  return arr.map(p => {
+    const stages = {};
+    STAGES.forEach(s => { stages[s.id] = normStage(p.stages ? p.stages[s.id] : null); });
+    return { id: p.id, number: p.number, name: p.name, category: p.category || null,
+      stages, notes: p.notes || '', plannedWindowDays: p.plannedWindowDays || DEFAULT_WINDOW, launchedAt: p.launchedAt || null };
+  });
+}
+function blankProject(p) {
+  const stages = {}; STAGES.forEach(s => stages[s.id] = { status: 'not_started' });
+  return { ...p, stages, notes: '', plannedWindowDays: DEFAULT_WINDOW, launchedAt: null };
+}
+
+const requiredStages = STAGES.filter(s => !s.optional);
+const isShipped  = (p) => p.stages.presentation.status === 'done';
+const isClosed   = (p) => requiredStages.every(s => p.stages[s.id].status === 'done');
+const stageWeightSum = STAGES.reduce((a, s) => a + s.weight, 0);
+const doneWeight = (p) => STAGES.filter(s => p.stages[s.id].status === 'done').reduce((a, s) => a + s.weight, 0);
+const currentStage = (p) => STAGES.find(s => p.stages[s.id].status !== 'done' && p.stages[s.id].status !== 'skipped');
+function staleStagesOf(p) {
+  return STAGES.filter(s => {
+    const st = p.stages[s.id];
+    return (st.status === 'in_progress' || st.status === 'waiting') && daysSince(st.since) >= STALE_DAYS;
+  });
+}
+
+// --- иконки ---
+const I = {
+  down: (p)=>(<svg className={p.className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>),
+  right:(p)=>(<svg className={p.className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>),
+  plus: (p)=>(<svg className={p.className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>),
+  trash:(p)=>(<svg className={p.className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>),
+  x:    (p)=>(<svg className={p.className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>),
+  check:(p)=>(<svg className={p.className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>),
+  star: (p)=>(<svg className={p.className} viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.5l2.9 6 6.6 .9-4.8 4.6 1.2 6.5L12 18.9 6.1 21.5l1.2-6.5L2.5 10.4l6.6-.9z"/></svg>),
+  clock:(p)=>(<svg className={p.className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>),
+  bell: (p)=>(<svg className={p.className} viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a6 6 0 0 0-6 6c0 5-2 6-2 8h16c0-2-2-3-2-8a6 6 0 0 0-6-6Zm0 20a3 3 0 0 0 3-3H9a3 3 0 0 0 3 3Z"/></svg>),
+  ship: (p)=>(<svg className={p.className} viewBox="0 0 24 24" fill="currentColor"><path d="M3 14l2 6h14l2-6-9-3-9 3Zm9-11l7 4-7 2-7-2 7-4Z"/></svg>),
+};
+
+function Mascot({ className }) {
+  return (
+    <svg className={className} viewBox="0 0 64 64" fill="none">
+      <ellipse cx="32" cy="58" rx="15" ry="3" fill="#000" opacity="0.06"/>
+      <path d="M32 6c12 0 20 8 20 22 0 16-9 26-20 26S12 44 12 28C12 14 20 6 32 6Z" fill="#E0001A"/>
+      <circle cx="24" cy="28" r="7" fill="#fff"/><circle cx="40" cy="28" r="7" fill="#fff"/>
+      <circle cx="25" cy="29" r="3.4" fill="#222"/><circle cx="39" cy="29" r="3.4" fill="#222"/>
+      <circle cx="26.2" cy="27.8" r="1.1" fill="#fff"/><circle cx="40.2" cy="27.8" r="1.1" fill="#fff"/>
+      <path d="M28 40c2 2 6 2 8 0" stroke="#2E6B00" strokeWidth="2.4" strokeLinecap="round"/>
+      <path d="M30 18l4-4 4 4" stroke="#B00015" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+    </svg>
+  );
+}
+
+function Celebration({ name, xp, onTime, onClose }) {
+  const colors = ['#E0001A','#1CB0F6','#FF9600','#FF4B4B','#CE82FF','#FFC800'];
+  const pieces = Array.from({ length: 36 }, (_, i) => ({ left: Math.random()*100, delay: Math.random()*0.5, color: colors[i%colors.length], dur: 1.2+Math.random()*0.8 }));
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        {pieces.map((p,i)=>(<span key={i} className="confetti-piece" style={{left:`${p.left}%`,background:p.color,animationDelay:`${p.delay}s`,animationDuration:`${p.dur}s`,borderRadius:i%2?'2px':'50%'}}/>))}
+      </div>
+      <div className="relative bg-white rounded-3xl px-7 py-8 max-w-xs w-full text-center duo-pop shadow-xl" onClick={e=>e.stopPropagation()}>
+        <Mascot className="w-20 h-20 mx-auto" />
+        <div className="mt-2 text-2xl font-extrabold text-[#E0001A]">Эксперимент отгружен! 🎉</div>
+        <div className="mt-1 text-sm font-bold text-slate-500">«{name}» дошёл до презентации</div>
+        <div className="mt-3 flex items-center justify-center gap-2">
+          <span className="inline-flex items-center gap-1.5 bg-amber-50 text-amber-600 font-extrabold rounded-full px-3 py-1 text-sm"><I.star className="w-4 h-4"/> +{xp} XP</span>
+          {onTime && <span className="inline-flex items-center bg-red-50 text-[#B00015] font-extrabold rounded-full px-3 py-1 text-sm">в срок ✓</span>}
+        </div>
+        <button onClick={onClose} className="duo-cta mt-5 w-full bg-[#E0001A] text-white font-extrabold uppercase tracking-wide text-sm rounded-2xl py-3">Класс!</button>
+      </div>
+    </div>
+  );
+}
+
+function StatPill({ icon, value, label, color }) {
+  return (
+    <div className="flex items-center gap-1.5 bg-white rounded-2xl px-3 py-2 shadow-sm border-2 border-slate-100">
+      <span className={color}>{icon}</span>
+      <div className="leading-none">
+        <div className="text-lg font-extrabold text-slate-800 tabular-nums">{value}</div>
+        <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</div>
+      </div>
+    </div>
+  );
+}
+
+function PhaseRibbon({ project }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      {PHASES.map(ph => {
+        if (ph.isRun) {
+          const launched = project.stages.rollout.status === 'done';
+          const calcDone = project.stages.calculate.status === 'done';
+          const cls = calcDone ? 'bg-[#E0001A]' : launched ? 'bg-[#1CB0F6] pulse-soft' : 'bg-slate-200';
+          return <div key={ph.id} className={`h-1.5 flex-1 rounded-full ${cls}`} title="Прогон" />;
+        }
+        const st = STAGES.filter(s => s.phase === ph.id);
+        const done = st.filter(s => ['done','skipped'].includes(project.stages[s.id].status)).length;
+        const pct = Math.round(done / st.length * 100);
+        return (
+          <div key={ph.id} className="h-1.5 flex-1 rounded-full bg-slate-200 overflow-hidden" title={ph.name}>
+            <div className="h-full bg-[#E0001A] rounded-full transition-all" style={{ width: `${pct}%` }} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function StageRow({ stage, st, menuOpen, onToggleMenu, onSet }) {
+  const days = (st.status === 'in_progress' || st.status === 'waiting') ? daysSince(st.since) : null;
+  const stale = days !== null && days >= STALE_DAYS;
+  const meta = STATUS[st.status];
+  const options = stage.optional ? ['not_started','in_progress','waiting','done','skipped'] : ['not_started','in_progress','waiting','done'];
+  const muted = st.status === 'skipped' || st.status === 'not_started';
+  return (
+    <div className="py-2.5">
+      <div className="flex items-center gap-3">
+        <span className={`shrink-0 w-2.5 h-2.5 rounded-full ${meta.dot} ${stale ? 'ring-2 ring-[#FF4B4B]/40' : ''}`} />
+        <div className="flex-1 min-w-0">
+          <div className={`text-sm font-extrabold truncate ${muted ? 'text-slate-400' : 'text-slate-700'} ${st.status==='skipped'?'line-through':''}`}>
+            {stage.label}
+            {stage.optional && <span className="ml-1.5 text-[10px] font-bold text-slate-400">опц.</span>}
+          </div>
+          <div className="mt-0.5 flex items-center gap-2 flex-wrap">
+            <span className={`text-[10px] font-bold rounded-full px-1.5 py-0.5 ${ROLE_STYLES[stage.role]}`}>{stage.role}</span>
+            {days !== null && (
+              <span className={`inline-flex items-center gap-1 text-[10px] font-extrabold ${stale ? 'text-[#FF4B4B]' : 'text-slate-400'}`}>
+                <I.clock className="w-3 h-3" /> {days} дн{stale ? ' · висит' : ''}
+              </span>
+            )}
+          </div>
+        </div>
+        <button onClick={onToggleMenu} className={`shrink-0 text-[11px] font-extrabold rounded-full px-2.5 py-1 ${meta.cls}`}>
+          {meta.label}
+        </button>
+      </div>
+      {menuOpen && (
+        <div className="mt-2 ml-5 flex flex-wrap gap-1.5">
+          {options.map(o => (
+            <button key={o} onClick={() => onSet(o)}
+              className={`text-[11px] font-extrabold rounded-full px-2.5 py-1 border-2 ${st.status===o ? 'border-slate-300 '+STATUS[o].cls : 'border-transparent '+STATUS[o].cls+' opacity-80'}`}>
+              {STATUS[o].label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RunTimer({ project, onWindow }) {
+  const launched = project.stages.rollout.status === 'done';
+  const calcDone = project.stages.calculate.status === 'done';
+  const win = project.plannedWindowDays || DEFAULT_WINDOW;
+  if (calcDone) {
+    return <div className="rounded-2xl bg-slate-50 px-3 py-2.5 text-xs font-extrabold text-slate-400">Прогон завершён — результат посчитан.</div>;
+  }
+  if (!launched) {
+    return <div className="rounded-2xl bg-slate-50 px-3 py-2.5 text-xs font-extrabold text-slate-400">Таймер запустится после этапа «Выкат».</div>;
+  }
+  const run = daysSince(project.launchedAt);
+  const remaining = win - run;
+  const pct = Math.max(0, Math.min(100, Math.round(run / win * 100)));
+  const over = remaining <= 0;
+  return (
+    <div className={`rounded-2xl px-3 py-3 border-2 ${over ? 'bg-amber-50 border-amber-200' : 'bg-blue-50 border-blue-100'}`}>
+      <div className="flex items-center justify-between">
+        <span className={`inline-flex items-center gap-1.5 text-sm font-extrabold ${over ? 'text-amber-600' : 'text-[#1899D6]'}`}>
+          {over ? <I.bell className="w-4 h-4" /> : <I.clock className="w-4 h-4" />}
+          {over ? 'Пора считать' : `Крутится ${run} из ${win} дн`}
+        </span>
+        <span className="text-[11px] font-extrabold text-slate-400">
+          {over ? `просрочка ${Math.abs(remaining)} дн` : `осталось ${remaining} дн`}
+        </span>
+      </div>
+      <div className="mt-2 h-2.5 bg-white rounded-full overflow-hidden">
+        <div className={`h-full rounded-full transition-all ${over ? 'bg-[#FF9600]' : 'bg-[#1CB0F6]'}`} style={{ width: `${pct}%` }} />
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        <span className="text-[11px] font-bold text-slate-400">Плановое окно:</span>
+        <input type="number" min="1" max="120" value={win}
+          onChange={(e) => onWindow(Math.max(1, parseInt(e.target.value || '1', 10)))}
+          className="w-16 text-xs font-extrabold rounded-lg border-2 border-slate-200 px-2 py-1 text-slate-700 focus:outline-none focus:border-[#1CB0F6]" />
+        <span className="text-[11px] font-bold text-slate-400">дн</span>
+      </div>
+    </div>
+  );
+}
+
+function ProjectTracker() {
+  const [projects, setProjects] = React.useState(null);
+  const [expanded, setExpanded] = React.useState({});
+  const [menu, setMenu] = React.useState(null); // `${projectId}:${stageId}`
+  const [showAdd, setShowAdd] = React.useState(false);
+  const [newName, setNewName] = React.useState('');
+  const [newCategory, setNewCategory] = React.useState('');
+  const [connStatus, setConnStatus] = React.useState('connecting');
+  const [celebrate, setCelebrate] = React.useState(null);
+
+  React.useEffect(() => {
+    let ref = null, listener = null;
+    const attach = () => {
+      ref = db.ref(DB_PATH);
+      listener = (snap) => {
+        const data = snap.val();
+        setConnStatus('ok');
+        if (data && Array.isArray(data) && data.length > 0) {
+          const norm = normalizeProjects(data);
+          setProjects(norm);
+          setExpanded(prev => Object.keys(prev).length ? prev : { [norm[0].id]: true });
+        } else if (data === null) {
+          ref.set(DEFAULT_PROJECTS.map(blankProject));
+        }
+      };
+      ref.on('value', listener, () => setConnStatus('error'));
+    };
+    const unsub = firebase.auth().onAuthStateChanged((u) => {
+      if (u) attach(); else firebase.auth().signInAnonymously().catch(() => setConnStatus('error'));
+    });
+    return () => { unsub(); if (ref && listener) ref.off('value', listener); };
+  }, []);
+
+  if (projects === null) {
+    return (
+      <div className="flex flex-col items-center justify-center h-72 gap-3 text-slate-400 font-bold text-sm text-center px-6">
+        <Mascot className="w-16 h-16 opacity-70" />
+        {connStatus === 'error' ? 'Не удалось подключиться к базе. Проверь firebaseConfig и правила.' : 'Загрузка...'}
+      </div>
+    );
+  }
+
+  const write = (next) => db.ref(DB_PATH).set(next).catch(() => setConnStatus('error'));
+
+  const setStatus = (projectId, stageId, newStatus) => {
+    const t = localDate();
+    let shippedName = null, shippedXp = 0, shippedOnTime = false;
+    const next = projects.map(p => {
+      if (p.id !== projectId) return p;
+      const cur = p.stages[stageId];
+      const wasShipped = isShipped(p);
+      let s = { ...cur, status: newStatus };
+      if ((newStatus === 'in_progress' || newStatus === 'waiting') && !cur.since) s.since = t;
+      if (newStatus === 'done') s.doneAt = t;
+      if (newStatus === 'not_started') { s.since = null; s.doneAt = null; }
+      const stages = { ...p.stages, [stageId]: s };
+      let proj = { ...p, stages };
+      if (stageId === 'rollout') proj.launchedAt = newStatus === 'done' ? (p.launchedAt || t) : null;
+      if (!wasShipped && isShipped(proj)) {
+        shippedName = proj.name;
+        shippedXp = doneWeight(proj) * XP_PER_WEIGHT;
+        const calcDone = proj.stages.calculate.doneAt;
+        shippedOnTime = proj.launchedAt && calcDone && daysBetween(proj.launchedAt, calcDone) <= (proj.plannedWindowDays || DEFAULT_WINDOW);
+      }
+      return proj;
+    });
+    setProjects(next); write(next); setMenu(null);
+    if (shippedName) setCelebrate({ name: shippedName, xp: shippedXp, onTime: shippedOnTime });
+  };
+
+  const setWindow = (projectId, win) => { const n = projects.map(p => p.id===projectId ? {...p, plannedWindowDays: win} : p); setProjects(n); write(n); };
+  const toggleExpand = (id) => setExpanded(prev => ({ ...prev, [id]: !prev[id] }));
+  const updateNotes = (id, v) => { const n = projects.map(p => p.id===id ? {...p, notes: v} : p); setProjects(n); write(n); };
+  const deleteProject = (id) => { const n = projects.filter(p => p.id!==id); setProjects(n); write(n); };
+  const addProject = () => {
+    const name = newName.trim(); if (!name) return;
+    const nums = projects.map(p => parseInt(p.number,10)).filter(n=>!isNaN(n));
+    const nextNum = nums.length ? Math.max(...nums)+1 : 1;
+    const id = `p${Date.now()}`;
+    const n = [...projects, blankProject({ id, number: String(nextNum), name, category: newCategory.trim() || null })];
+    setProjects(n); write(n); setExpanded(prev => ({...prev, [id]: true}));
+    setNewName(''); setNewCategory(''); setShowAdd(false);
+  };
+
+  // портфельная статистика
+  const totalXp = projects.reduce((a,p) => a + doneWeight(p)*XP_PER_WEIGHT, 0);
+  const maxXp = projects.length * stageWeightSum * XP_PER_WEIGHT;
+  const level = Math.floor(totalXp / 100) + 1;
+  const xpInLevel = totalXp % 100;
+  const shipped = projects.filter(isShipped).length;
+  const staleCount = projects.reduce((a,p) => a + staleStagesOf(p).length, 0);
+  const dueToCalc = projects.filter(p => p.stages.rollout.status==='done' && p.stages.calculate.status!=='done' && daysSince(p.launchedAt) >= (p.plannedWindowDays||DEFAULT_WINDOW)).length;
+
+  const pep = shipped === projects.length && projects.length>0 ? 'Все эксперименты отгружены. Машина!'
+    : dueToCalc > 0 ? `${dueToCalc} ${dueToCalc===1?'эксперимент':'экспериментов'} пора считать — окно вышло.`
+    : staleCount > 0 ? `${staleCount} ${staleCount===1?'этап завис':'этапа зависли'} — стоит подтолкнуть.`
+    : totalXp === 0 ? 'Закрой первый этап — путь к выкату начинается здесь.'
+    : 'Хороший темп. Двигаемся к выкату.';
+
+  return (
+    <div className="max-w-2xl mx-auto p-4 sm:p-6">
+      {celebrate && <Celebration {...celebrate} onClose={() => setCelebrate(null)} />}
+
+      <header className="mb-5">
+        <div className="flex items-center justify-between gap-2">
+          <h1 className="text-2xl font-extrabold text-slate-800 tracking-tight">Трекер экспериментов</h1>
+          <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-400">
+            <span className={`w-2 h-2 rounded-full ${connStatus==='ok'?'bg-[#E0001A]':connStatus==='error'?'bg-[#FF4B4B]':'bg-slate-300'}`} />
+            {connStatus==='ok'?'синхронизация':connStatus==='error'?'нет связи':'...'}
+          </span>
+        </div>
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          <StatPill icon={<I.ship className="w-6 h-6"/>} value={`${shipped}/${projects.length}`} label="отгружено" color="text-[#E0001A]" />
+          <StatPill icon={<I.star className="w-6 h-6"/>} value={totalXp} label="XP" color="text-[#FFC800]" />
+          <StatPill icon={<span className="grid place-items-center w-6 h-6 rounded-full bg-[#1CB0F6] text-white text-xs font-extrabold">{level}</span>} value={`ур. ${level}`} label="уровень" color="" />
+          <StatPill icon={<I.clock className="w-6 h-6"/>} value={staleCount} label="застряло" color={staleCount?'text-[#FF4B4B]':'text-slate-300'} />
+        </div>
+
+        <div className="mt-3 flex items-center gap-3 bg-white rounded-2xl border-2 border-slate-100 px-3 py-2.5">
+          <Mascot className="w-9 h-9 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-extrabold text-slate-700">{pep}</div>
+            <div className="mt-1.5 flex items-center gap-2">
+              <div className="h-2.5 flex-1 bg-slate-100 rounded-full overflow-hidden">
+                <div className="h-full bg-[#FFC800] rounded-full transition-all" style={{ width: `${xpInLevel}%` }} />
+              </div>
+              <span className="text-[11px] font-extrabold text-slate-400 tabular-nums">{xpInLevel}/100</span>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div className="space-y-3">
+        {projects.map(p => {
+          const isOpen = !!expanded[p.id];
+          const closed = isClosed(p);
+          const shippedP = isShipped(p);
+          const cur = currentStage(p);
+          const curMeta = cur ? p.stages[cur.id] : null;
+          const curDays = cur && (curMeta.status==='in_progress'||curMeta.status==='waiting') ? daysSince(curMeta.since) : null;
+          const stales = staleStagesOf(p).length;
+          return (
+            <div key={p.id} className="rounded-3xl bg-white border-2 border-slate-100">
+              <button onClick={() => toggleExpand(p.id)} className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-slate-50 transition-colors rounded-3xl">
+                {isOpen ? <I.down className="w-5 h-5 text-slate-300 shrink-0"/> : <I.right className="w-5 h-5 text-slate-300 shrink-0"/>}
+                <span className={`shrink-0 grid place-items-center w-9 h-9 rounded-2xl text-sm font-extrabold ${shippedP?'bg-[#E0001A] text-white':'bg-slate-100 text-slate-500'}`}>
+                  {shippedP ? <I.check className="w-5 h-5"/> : p.number}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-extrabold text-slate-800 truncate">{p.name}</span>
+                    {p.category && <span className="text-[10px] font-bold text-slate-400 bg-slate-50 rounded-full px-2 py-0.5 shrink-0">{p.category}</span>}
+                    {stales>0 && <span className="text-[10px] font-extrabold text-[#FF4B4B] bg-red-50 rounded-full px-2 py-0.5 shrink-0">застряло {stales}</span>}
+                  </div>
+                  <div className="mt-2"><PhaseRibbon project={p} /></div>
+                  <div className="mt-1.5 text-[11px] font-bold text-slate-400">
+                    {shippedP ? 'Отгружено' : cur ? <>Сейчас: <span className="text-slate-600">{cur.label}</span> · {STATUS[curMeta.status].label}{curDays!==null?` · ${curDays} дн`:''}</> : 'Готово'}
+                  </div>
+                </div>
+              </button>
+
+              {isOpen && (
+                <div className="px-4 pb-5 pt-1 border-t-2 border-slate-50">
+                  {PHASES.map(ph => (
+                    <div key={ph.id} className="mt-3">
+                      <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-400 mb-1">{ph.name}</div>
+                      {ph.isRun ? (
+                        <RunTimer project={p} onWindow={(w)=>setWindow(p.id, w)} />
+                      ) : (
+                        <div className="divide-y divide-slate-50">
+                          {STAGES.filter(s => s.phase===ph.id).map(stage => {
+                            const key = `${p.id}:${stage.id}`;
+                            return (
+                              <StageRow key={stage.id} stage={stage} st={p.stages[stage.id]}
+                                menuOpen={menu===key}
+                                onToggleMenu={() => setMenu(menu===key ? null : key)}
+                                onSet={(o) => setStatus(p.id, stage.id, o)} />
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+
+                  <textarea value={p.notes} onChange={(e)=>updateNotes(p.id, e.target.value)} placeholder="Заметки по эксперименту..." rows={2}
+                    className="mt-4 w-full text-sm font-semibold rounded-2xl border-2 border-slate-100 px-3 py-2 text-slate-700 placeholder:text-slate-300 focus:outline-none focus:border-[#1CB0F6] resize-none" />
+                  <div className="mt-2 flex justify-end">
+                    <button onClick={()=>deleteProject(p.id)} className="inline-flex items-center gap-1 text-xs font-bold text-slate-300 hover:text-[#FF4B4B] transition-colors">
+                      <I.trash className="w-3.5 h-3.5"/> Удалить проект
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-3">
+        {showAdd ? (
+          <div className="rounded-3xl bg-white border-2 border-slate-100 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-extrabold text-slate-800">Новый эксперимент</span>
+              <button onClick={()=>setShowAdd(false)} className="text-slate-300 hover:text-slate-500"><I.x className="w-4 h-4"/></button>
+            </div>
+            <input value={newName} onChange={(e)=>setNewName(e.target.value)} placeholder="Название" autoFocus
+              className="w-full text-sm font-semibold rounded-2xl border-2 border-slate-100 px-3 py-2.5 text-slate-700 placeholder:text-slate-300 focus:outline-none focus:border-[#1CB0F6]" />
+            <input value={newCategory} onChange={(e)=>setNewCategory(e.target.value)} placeholder="Категория (необязательно)"
+              className="w-full text-sm font-semibold rounded-2xl border-2 border-slate-100 px-3 py-2.5 text-slate-700 placeholder:text-slate-300 focus:outline-none focus:border-[#1CB0F6]" />
+            <button onClick={addProject} disabled={!newName.trim()}
+              className="duo-cta w-full text-sm font-extrabold uppercase tracking-wide rounded-2xl bg-[#E0001A] text-white py-3 disabled:opacity-40 disabled:shadow-none">Добавить</button>
+          </div>
+        ) : (
+          <button onClick={()=>setShowAdd(true)} className="w-full flex items-center justify-center gap-1.5 rounded-3xl border-2 border-dashed border-slate-200 text-sm font-extrabold text-slate-300 hover:text-slate-500 hover:border-slate-300 py-4 transition-colors">
+            <I.plus className="w-4 h-4"/> Добавить эксперимент
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SetupInstructions() {
+  const ruleSnippet = `{\n  "rules": {\n    ".read": "auth != null",\n    ".write": "auth != null"\n  }\n}`;
+  return (
+    <div className="max-w-2xl mx-auto p-6">
+      <h1 className="text-2xl font-extrabold text-slate-800">Настройка Firebase</h1>
+      <p className="mt-2 text-sm font-semibold text-slate-500">Вставь конфиг проекта в начало файла, включи Anonymous-авторизацию, задай правила:</p>
+      <pre className="mt-3 bg-slate-900 text-slate-100 text-xs rounded-2xl p-4 overflow-x-auto">{ruleSnippet}</pre>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(isConfigured ? <ProjectTracker /> : <SetupInstructions />);
+
+</script>
+</body>
+</html>
