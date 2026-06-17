@@ -29,7 +29,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.23.10/babel.min.js"></script>
 
 <script type="text/babel">
 
@@ -157,17 +157,110 @@ const I = {
   ship: (p)=>(<svg className={p.className} viewBox="0 0 24 24" fill="currentColor"><path d="M3 14l2 6h14l2-6-9-3-9 3Zm9-11l7 4-7 2-7-2 7-4Z"/></svg>),
 };
 
-function Mascot({ className }) {
+function Mascot({ className, mood = 'neutral' }) {
+  const browL = mood === 'happy' ? "M20 22 Q23 20 26 22" : mood === 'thinking' ? "M20 22 Q23 23 26 21" : "M20 23 Q23 20 26 23";
+  const browR = mood === 'happy' ? "M38 22 Q41 20 44 22" : mood === 'thinking' ? "M38 21 Q41 23 44 22" : "M38 23 Q41 20 44 23";
+  const mouth = mood === 'happy' ? "M26 41 Q32 46 38 41" : mood === 'thinking' ? "M27 42 Q32 40 37 42" : "M27 43 Q32 40 37 43";
   return (
     <svg className={className} viewBox="0 0 64 64" fill="none">
-      <ellipse cx="32" cy="58" rx="15" ry="3" fill="#000" opacity="0.06"/>
-      <path d="M32 6c12 0 20 8 20 22 0 16-9 26-20 26S12 44 12 28C12 14 20 6 32 6Z" fill="#E0001A"/>
-      <circle cx="24" cy="28" r="7" fill="#fff"/><circle cx="40" cy="28" r="7" fill="#fff"/>
-      <circle cx="25" cy="29" r="3.4" fill="#222"/><circle cx="39" cy="29" r="3.4" fill="#222"/>
-      <circle cx="26.2" cy="27.8" r="1.1" fill="#fff"/><circle cx="40.2" cy="27.8" r="1.1" fill="#fff"/>
-      <path d="M28 40c2 2 6 2 8 0" stroke="#2E6B00" strokeWidth="2.4" strokeLinecap="round"/>
-      <path d="M30 18l4-4 4 4" stroke="#B00015" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+      <ellipse cx="32" cy="61" rx="14" ry="2.5" fill="#000" opacity="0.08"/>
+      <circle cx="10" cy="28" r="7.5" fill="#C0001A"/>
+      <circle cx="54" cy="28" r="7.5" fill="#C0001A"/>
+      <circle cx="16" cy="13" r="6.5" fill="#C0001A"/>
+      <circle cx="48" cy="13" r="6.5" fill="#C0001A"/>
+      <circle cx="32" cy="8"  r="7"   fill="#C0001A"/>
+      <circle cx="10" cy="44" r="6"   fill="#C0001A"/>
+      <circle cx="54" cy="44" r="6"   fill="#C0001A"/>
+      <circle cx="32" cy="34" r="23" fill="#E0001A"/>
+      <circle cx="18" cy="20" r="3.5" fill="#E8203A" opacity=".5"/>
+      <circle cx="46" cy="19" r="3"   fill="#E8203A" opacity=".5"/>
+      <circle cx="14" cy="38" r="3"   fill="#E8203A" opacity=".4"/>
+      <circle cx="50" cy="40" r="2.5" fill="#E8203A" opacity=".4"/>
+      <circle cx="32" cy="54" r="4"   fill="#E8203A" opacity=".35"/>
+      <ellipse cx="10" cy="40" rx="4.5" ry="5.5" fill="#E0001A"/>
+      <ellipse cx="54" cy="40" rx="4.5" ry="5.5" fill="#E0001A"/>
+      <path d={browL} stroke="#1a0000" strokeWidth="2.6" strokeLinecap="round" fill="none"/>
+      <path d={browR} stroke="#1a0000" strokeWidth="2.6" strokeLinecap="round" fill="none"/>
+      <ellipse cx="26" cy="31" rx="5.5" ry="5.5" fill="#fff"/>
+      <ellipse cx="38" cy="31" rx="5.5" ry="5.5" fill="#fff"/>
+      <circle  cx="27" cy="32" r="3.2" fill="#111"/>
+      <circle  cx="39" cy="32" r="3.2" fill="#111"/>
+      <circle  cx="28" cy="31" r="1.1" fill="#fff"/>
+      <circle  cx="40" cy="31" r="1.1" fill="#fff"/>
+      <path d={mouth} stroke="#1a0000" strokeWidth="2.2" strokeLinecap="round" fill="none"/>
     </svg>
+  );
+}
+
+
+function DayPlan({ projects, onClose }) {
+  const [plan, setPlan] = React.useState('');
+  const [loading, setLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    const summary = projects.map(p => {
+      const cur = STAGES.find(s => p.stages[s.id].status !== 'done' && p.stages[s.id].status !== 'skipped');
+      const stales = STAGES.filter(s => {
+        const st = p.stages[s.id];
+        return (st.status === 'in_progress' || st.status === 'waiting') && daysSince(st.since) >= STALE_DAYS;
+      });
+      const launched = p.stages.rollout.status === 'done';
+      const calcDone = p.stages.calculate.status === 'done';
+      const runDays = launched && !calcDone ? daysSince(p.launchedAt) : null;
+      const overdue = runDays !== null && runDays >= (p.plannedWindowDays || DEFAULT_WINDOW);
+      return `- «${p.name}»: текущий этап — ${cur ? cur.label + ' (ответственный: ' + cur.role + ', статус: ' + p.stages[cur.id].status + ')' : 'всё готово'}${stales.length ? ', зависшие этапы: ' + stales.map(s => s.label).join(', ') : ''}${overdue ? ', прогон ПРОСРОЧЕН на ' + (runDays - (p.plannedWindowDays || DEFAULT_WINDOW)) + ' дн — пора считать' : ''}`;
+    }).join('\n');
+
+    const prompt = `Ты — ассистент продакт-менеджера банка. Вот текущее состояние экспериментов:\n\n${summary}\n\nСоставь конкретный план на сегодня: что нужно сделать в первую очередь, что можно подождать, что нужно подтолкнуть у коллег. Ответ короткий, структурированный, без воды. Используй emoji для визуального разделения блоков. Пиши по-русски.`;
+
+    fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1000,
+        messages: [{ role: 'user', content: prompt }],
+      })
+    })
+    .then(r => r.json())
+    .then(data => {
+      const text = data.content?.filter(b => b.type === 'text').map(b => b.text).join('') || 'Не удалось получить план.';
+      setPlan(text);
+    })
+    .catch(() => setPlan('Не удалось получить план — проверь соединение.'))
+    .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="relative bg-white rounded-3xl w-full max-w-md max-h-[80vh] flex flex-col duo-pop shadow-xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center gap-3 px-5 pt-5 pb-3 border-b-2 border-slate-50">
+          <Mascot className="w-10 h-10 shrink-0" mood={loading ? 'thinking' : 'neutral'} />
+          <div>
+            <div className="text-base font-extrabold text-slate-800">План на сегодня</div>
+            <div className="text-xs font-bold text-slate-400">составлен на основе текущих статусов</div>
+          </div>
+          <button onClick={onClose} className="ml-auto text-slate-300 hover:text-slate-500">
+            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          {loading ? (
+            <div className="flex flex-col items-center justify-center py-10 gap-3">
+              <Mascot className="w-14 h-14 pulse-soft" mood="thinking" />
+              <span className="text-sm font-bold text-slate-400">Думаю над планом…</span>
+            </div>
+          ) : (
+            <div className="text-sm font-semibold text-slate-700 whitespace-pre-wrap leading-relaxed">{plan}</div>
+          )}
+        </div>
+        {!loading && (
+          <div className="px-5 pb-5 pt-2 border-t-2 border-slate-50">
+            <button onClick={onClose} className="duo-cta w-full bg-[#E0001A] text-white font-extrabold uppercase tracking-wide text-sm rounded-2xl py-3">Понял, берусь</button>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -318,6 +411,7 @@ function ProjectTracker() {
   const [newCategory, setNewCategory] = React.useState('');
   const [connStatus, setConnStatus] = React.useState('connecting');
   const [celebrate, setCelebrate] = React.useState(null);
+  const [showPlan, setShowPlan] = React.useState(false);
 
   React.useEffect(() => {
     let ref = null, listener = null;
@@ -410,11 +504,16 @@ function ProjectTracker() {
 
   return (
     <div className="max-w-2xl mx-auto p-4 sm:p-6">
+      {showPlan && <DayPlan projects={projects} onClose={() => setShowPlan(false)} />}
       {celebrate && <Celebration {...celebrate} onClose={() => setCelebrate(null)} />}
 
       <header className="mb-5">
         <div className="flex items-center justify-between gap-2">
           <h1 className="text-2xl font-extrabold text-slate-800 tracking-tight">Трекер экспериментов</h1>
+          <button onClick={() => setShowPlan(true)} className="shrink-0 flex items-center gap-1.5 bg-white border-2 border-slate-100 rounded-2xl px-3 py-1.5 text-xs font-extrabold text-slate-600 hover:border-[#E0001A] hover:text-[#E0001A] transition-colors shadow-sm">
+            <Mascot className="w-5 h-5" mood="neutral" />
+            План на день
+          </button>
           <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-400">
             <span className={`w-2 h-2 rounded-full ${connStatus==='ok'?'bg-[#E0001A]':connStatus==='error'?'bg-[#FF4B4B]':'bg-slate-300'}`} />
             {connStatus==='ok'?'синхронизация':connStatus==='error'?'нет связи':'...'}
