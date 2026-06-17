@@ -45,13 +45,13 @@ const firebaseConfig = {
 };
 
 const DB_PATH = "projectTracker";
+const GROQ_API_KEY = "YOUR_GROQ_API_KEY"; // подставляется через GitHub Actions // замени на свой ключ с console.groq.com
 const XP_PER_WEIGHT = 10;
 const STALE_DAYS = 7;            // порог застоя активного этапа
 const DEFAULT_WINDOW = 14;       // плановое окно прогона, дней
-const isConfigured = firebaseConfig.apiKey !== "YOUR_API_KEY";
 
-let db = null;
-if (isConfigured) { firebase.initializeApp(firebaseConfig); db = firebase.database(); }
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
 
 // phase: 0 Подготовка, 1 Запуск, 2 Прогон (без этапов — таймер), 3 Анализ, 4 Завершение
 const STAGES = [
@@ -213,18 +213,21 @@ function DayPlan({ projects, onClose }) {
 
     const prompt = `Ты — ассистент продакт-менеджера банка. Вот текущее состояние экспериментов:\n\n${summary}\n\nСоставь конкретный план на сегодня: что нужно сделать в первую очередь, что можно подождать, что нужно подтолкнуть у коллег. Ответ короткий, структурированный, без воды. Используй emoji для визуального разделения блоков. Пиши по-русски.`;
 
-    fetch('https://api.anthropic.com/v1/messages', {
+    fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
+      },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
+        model: 'llama-3.1-8b-instant',
         max_tokens: 1000,
         messages: [{ role: 'user', content: prompt }],
       })
     })
     .then(r => r.json())
     .then(data => {
-      const text = data.content?.filter(b => b.type === 'text').map(b => b.text).join('') || 'Не удалось получить план.';
+      const text = data.choices?.[0]?.message?.content || 'Не удалось получить план.';
       setPlan(text);
     })
     .catch(() => setPlan('Не удалось получить план — проверь соединение.'))
@@ -631,19 +634,9 @@ function ProjectTracker() {
   );
 }
 
-function SetupInstructions() {
-  const ruleSnippet = `{\n  "rules": {\n    ".read": "auth != null",\n    ".write": "auth != null"\n  }\n}`;
-  return (
-    <div className="max-w-2xl mx-auto p-6">
-      <h1 className="text-2xl font-extrabold text-slate-800">Настройка Firebase</h1>
-      <p className="mt-2 text-sm font-semibold text-slate-500">Вставь конфиг проекта в начало файла, включи Anonymous-авторизацию, задай правила:</p>
-      <pre className="mt-3 bg-slate-900 text-slate-100 text-xs rounded-2xl p-4 overflow-x-auto">{ruleSnippet}</pre>
-    </div>
-  );
-}
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(isConfigured ? <ProjectTracker /> : <SetupInstructions />);
+root.render(<ProjectTracker />);
 
 </script>
 </body>
